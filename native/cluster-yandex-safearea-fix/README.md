@@ -1,110 +1,85 @@
 # cluster-yandex-safearea-fix
 
 A small reversible add-on tool for [waze-on-cluster](https://github.com/robertnisipeanu/idrive-apps)
-on a BMW iDrive 7 head unit (MGU) that **fixes the CarPlay instrument-cluster
+on a BMW iDrive 7 head unit (MGU) that **sets the CarPlay instrument-cluster
 safe area for Yandex Maps**.
 
 CarPlay is iPhone-only, so this is for the **iOS** Yandex Maps app projected
 over CarPlay — not Android Auto.
 
-## What it fixes
+## What it does
 
-waze-on-cluster advertises the cluster map at 1088×480 and sets its own default
-**safe area** — the rectangle where the phone is told to keep its guidance UI
-(the next-turn banner, etc.) so it stays clear of the gauges. With **Yandex
-Maps** that default (x = 286) puts the banner in the wrong place. This tool
-moves the safe area to **504×368+433+72**, tuned for Yandex Maps.
+waze-on-cluster advertises the cluster map and tells the phone a **safe area** —
+the rectangle where the phone keeps its guidance UI (the next-turn banner) clear
+of the gauges. Its default (x = 286) puts that banner in the wrong place for
+**Yandex Maps**; this tool moves it to **504×368+433+72**, tuned for Yandex Maps.
 
-**The safe area is one rectangle for every CarPlay app.** It is not per-app, so
-this offset applies to all of them: it is right for Yandex Maps and **may
-misplace the banner on other apps** (Apple Maps, Google Maps, Waze). Install it
-only if Yandex Maps is the navigator you use on the cluster.
+**The safe area is one rectangle for every CarPlay app.** It is right for Yandex
+Maps and **may misplace the banner on others** (Apple Maps, Google Maps, Waze).
+Install it only if Yandex Maps is the navigator you use on the cluster.
 
-## Why it is a separate tool with a boot service
+## How it works — a thin wrapper, not its own patch
 
-The safe area lives inside waze-on-cluster's own resolution patch (edit 4), and
-waze-on-cluster rewrites that region back to its default on every **Enable map**
-and on every update. So this fix cannot be a one-time patch: a small root
-service re-applies the Yandex safe area **once after each boot**, after
-waze-on-cluster's patch daemon has settled. The change takes effect at the next
-head-unit start, the same way waze-on-cluster works.
+This tool does **not** edit carplay itself. It calls waze-on-cluster's own
+patcher: it reads `carplay_patch.js status`, and, when the cluster map is
+enabled on the high panel, runs
 
-It writes only the two 8-byte safe-area immediates of the IC_HIGH geometry
-builder (found by structure, not fixed address) and keeps a backup of exactly
-those bytes. The backup is stamped with the carplay binary it came from (build-id
-and size): a waze-on-cluster update or Enable map keeps the same binary, so the
-backup stays valid, but a BMW firmware update replaces carplay with a different
-binary — then, on the next apply, the tool takes a fresh backup of the new
-binary's original bytes before re-applying the offset, and overwrites the old
-backup (one backup file, no stale copies). So removing the tool always restores
-whatever the current carplay shipped with. If it is ever asked to take a first
-backup while the safe area already reads as its own wanted value (e.g. the backup
-was deleted by hand while the offset was applied), it refuses rather than record
-its own edit as the original — restore waze-on-cluster's safe area first (Enable
-map) and apply again. It refuses unless waze-on-cluster's
-resolution patch is active (physical size 138×61 mm), so it never rewrites a
-stock geometry. It never stops, kills, restarts or reboots CarPlay. Proven on
-carplay `22.28.3` (build-id `5de62156…`).
+```
+carplay_patch.js apply --panel high --safe 504x368+433+72
+```
+
+— the same 16 bytes waze-on-cluster would write, with **waze-on-cluster's own
+locator and backup** (`carplay.woc-orig`). So this tool keeps **no locator and
+no backup of its own**: there is nothing of ours to go stale.
+
+waze-on-cluster writes its default safe area on every **Enable map** and resets
+it on updates, so a small root **boot service** re-applies the Yandex offset
+once after each start (`reconcile`). The change takes effect at the next
+head-unit start, the same way waze-on-cluster works. It preserves a redirected
+capture sink (the HUD/capture path is not reset), never stops, kills, restarts
+or reboots carplay, and **never enables a map the owner turned off** — with the
+map off it does nothing.
+
+It **always exits 0**: if the offset cannot be written now (the map is off,
+waze-on-cluster is not installed, carplay status is unreadable, `/` is not
+writable), it logs the reason and leaves the next boot's reconcile to apply it,
+so a Store install or update is never rolled back, and a removal is never
+refused.
 
 ## The offset
 
-Default: **504×368+433+72** in the 1088×480 cluster frame. Change it without
-editing shipped files by writing a line to
-`/var/opt/cluster-yandex-safearea-fix/safearea.local.conf`:
+Default: **504×368+433+72**. Change it without editing shipped files by writing
+a line to `/var/opt/cluster-yandex-safearea-fix/safearea.local.conf`:
 
 ```
 safe=504x368+433+72
 ```
 
-(updates overwrite the shipped `safearea.conf`, but keep `safearea.local.conf`).
+(updates keep `safearea.local.conf`).
 
 ## Install and remove
 
 Install **after** waze-on-cluster and enable its map first. The deploy tool runs
 `safearead.js activate`; the Store shows a restart pending, and the safe area
 takes effect at the next head-unit start. Remove it in the Store;
-`safearead.js deactivate` restores the safe area from its backup.
+`safearead.js deactivate` runs `carplay_patch.js apply --panel high` with
+waze-on-cluster's own default safe area (504×368+286+72), so the banner returns
+to where waze-on-cluster puts it, with the map still on.
 
-**activate never fails the install.** If the offset cannot be written now (the
-map is off, carplay is not located, `/` is not writable, or there is no backup
-to tell the original from this tool's own edit), activate logs the reason and
-exits 0, leaving the next boot's reconcile to apply it — so a Store update is
-never rolled back for it.
+## Note
 
-**deactivate never blocks removal, and never writes into another binary.** It
-restores only a backup that belongs to the carplay installed now (same build-id
-and size, same located offsets); after a firmware update replaced carplay the
-backup is for a binary that is gone and this tool's edit is not on the new one,
-so removal succeeds doing nothing and drops the stale backup rather than writing
-old bytes at old offsets. It also clears this tool's leftovers from `/usr/bin`
-(`…woc-safearea-tmp`, and the running-link once nothing runs it).
-
-**What "restores" means.** At the first install the tool backs up the safe area
-as it is **at that moment** (`/usr/bin/carplay.woc-safearea.json`), and removal
-puts exactly that back. If the safe area was already changed by hand before the
-install (e.g. already 433), removal returns that value, not waze-on-cluster's
-default 286. To have removal return 286, press **Enable map** in the
-waze-on-cluster app before installing this tool.
-
-**Remove it while the map is on.** If you turn the map off (Disable map, which
-puts back the stock 1920×900 geometry) and then remove this tool, the removal
-writes the backed-up 1088×480 safe area over the stock geometry, leaving it
-inconsistent. Remove this tool first, or press Enable map again before removing
-it.
+The same Yandex offset is baked into the **yandex-on-cluster** fork of
+waze-on-cluster (its Enable map writes 433 by default), which needs no separate
+tool. This tool is for a car running **upstream** waze-on-cluster.
 
 ## From a shell
 
 ```sh
-node safearea_patch.js status                         # show current and wanted safe area
-node safearea_patch.js apply  --yes                   # apply 504x368+433+72 (or the conf's)
-node safearea_patch.js apply  --safe 504x368+420+72 --yes   # a different offset
-node safearea_patch.js reconcile --yes                # re-apply if waze-on-cluster reset it
-node safearea_patch.js revert --yes                   # restore waze-on-cluster's safe area
-node safearea_patch.js verify                         # exit 0 when set
+node safearead.js activate      # set the Yandex safe area if the map is on
+node safearead.js reconcile     # the boot service: re-apply if it was reset
+node safearead.js deactivate    # restore waze-on-cluster's default safe area
 ```
 
 ## License
 
-GPL-3.0-or-later (`LICENSE`). Derived from waze-on-cluster
-(`carplay_locate.js`, `remount_lock.js`), Copyright (C) 2026 Robert Nisipeanu,
-also GPL-3.0-or-later.
+GPL-3.0-or-later (`LICENSE`).

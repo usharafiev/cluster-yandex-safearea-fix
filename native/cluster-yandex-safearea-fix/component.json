@@ -24,8 +24,6 @@
     "deactivate"
   ],
   "files": [
-    { "path": "safearea_patch.js", "from": "patch/safearea_patch.js", "mode": "0644" },
-    { "path": "safearea_locate.js", "from": "patch/safearea_locate.js", "mode": "0644" },
     { "path": "safearead.js", "from": "patch/safearead.js", "mode": "0644" },
     { "path": "remount_lock.js", "from": "patch/remount_lock.js", "mode": "0644" },
     { "path": "safearea.conf", "from": "safearea.conf", "mode": "0644" },
